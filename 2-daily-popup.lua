@@ -328,6 +328,87 @@ local function buildTableRows(stats_data, fonts, layout)
     return rows
 end
 
+local function buildPaginationBar(fonts, layout, current_page, total_pages, on_first, on_prev, on_next, on_last)
+    -- Button builder: returns a tappable TextWidget wrapped in a FrameContainer
+    local btn_w = Screen:scaleBySize(44)
+    local btn_h = Screen:scaleBySize(32)
+
+    local function makeBtn(label, enabled, handler)
+        local face = enabled and fonts.cell or fonts.header
+        local txt = TextWidget:new{
+            text = label,
+            face = face,
+        }
+        local btn = FrameContainer:new{
+            background = enabled and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_GRAY_E,
+            bordersize = Size.line.thin,
+            radius    = Screen:scaleBySize(3),
+            padding_top    = Screen:scaleBySize(4),
+            padding_bottom = Screen:scaleBySize(4),
+            padding_left   = Screen:scaleBySize(8),
+            padding_right  = Screen:scaleBySize(8),
+            dimen = Geom:new{ w = btn_w, h = btn_h },
+            txt,
+        }
+        if enabled and handler then
+            btn.handler = handler
+        end
+        return btn
+    end
+
+    local page_label = TextWidget:new{
+        text = string.format("%d / %d", current_page, total_pages),
+        face = fonts.cell,
+    }
+
+    local bar = HorizontalGroup:new{ align = "center" }
+    -- Push the bar to the right with a flexible left span
+    local bar_inner = HorizontalGroup:new{ align = "center" }
+
+    local first_btn = makeBtn("«", current_page > 1, on_first)
+    local prev_btn  = makeBtn("‹", current_page > 1, on_prev)
+    local next_btn  = makeBtn("›", current_page < total_pages, on_next)
+    local last_btn  = makeBtn("»", current_page < total_pages, on_last)
+
+    table.insert(bar_inner, first_btn)
+    table.insert(bar_inner, HorizontalSpan:new{ width = Screen:scaleBySize(6) })
+    table.insert(bar_inner, prev_btn)
+    table.insert(bar_inner, HorizontalSpan:new{ width = Screen:scaleBySize(10) })
+    table.insert(bar_inner, page_label)
+    table.insert(bar_inner, HorizontalSpan:new{ width = Screen:scaleBySize(10) })
+    table.insert(bar_inner, next_btn)
+    table.insert(bar_inner, HorizontalSpan:new{ width = Screen:scaleBySize(6) })
+    table.insert(bar_inner, last_btn)
+
+    -- Right-aligned: fill remaining space on the left
+    local bar_inner_w = btn_w * 4 + Screen:scaleBySize(6 + 10 + 10 + 6) + page_label:getSize().w
+    local left_fill = layout.full_width - 2 * layout.padding_h - bar_inner_w
+    if left_fill < 0 then left_fill = 0 end
+
+    table.insert(bar, HorizontalSpan:new{ width = left_fill })
+    table.insert(bar, bar_inner)
+
+    local pagination_frame = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = 0,
+        padding_top    = Size.padding.default,
+        padding_bottom = Size.padding.default,
+        padding_left   = layout.padding_h,
+        padding_right  = layout.padding_h,
+        bar,
+    }
+
+    -- Collect tappable buttons and their handlers for gesture dispatch
+    local tap_targets = {
+        { widget = first_btn, handler = on_first, enabled = current_page > 1 },
+        { widget = prev_btn,  handler = on_prev,  enabled = current_page > 1 },
+        { widget = next_btn,  handler = on_next,  enabled = current_page < total_pages },
+        { widget = last_btn,  handler = on_last,  enabled = current_page < total_pages },
+    }
+
+    return pagination_frame, tap_targets
+end
+
 Dispatcher:registerAction("reading_stats_table", {
     category = "none",
     event = "ShowReadingStatsTable",
@@ -335,9 +416,12 @@ Dispatcher:registerAction("reading_stats_table", {
     reader = true,
 })
 
+local ROWS_PER_PAGE = 7
+
 local ReadingStatsTable = InputContainer:extend{
     modal = true,
     ui = nil,
+    current_page = 1,
 }
 
 function ReadingStatsTable:init()
@@ -381,10 +465,23 @@ function ReadingStatsTable:buildContent()
     end
     
     local book_id = self.stats_plugin and self.stats_plugin.id_curr_book
-    local stats_data = getReadingStatsForDays(book_id, 30)
+    local all_stats = getReadingStatsForDays(book_id, 365)
     local book_title = truncateTitle(getBookTitle(self.ui), 30)
     local days_read = getTotalDaysRead(book_id)
     
+    -- Pagination calculations
+    local total_rows  = #all_stats
+    local total_pages = math.max(1, math.ceil(total_rows / ROWS_PER_PAGE))
+    if self.current_page > total_pages then self.current_page = total_pages end
+    if self.current_page < 1 then self.current_page = 1 end
+
+    local page_start = (self.current_page - 1) * ROWS_PER_PAGE + 1
+    local page_end   = math.min(page_start + ROWS_PER_PAGE - 1, total_rows)
+    local stats_data = {}
+    for i = page_start, page_end do
+        table.insert(stats_data, all_stats[i])
+    end
+
     local title_text = string.format("%s - %d %s", book_title, days_read, _("Days Reading"))
     local title = TextWidget:new{ text = title_text, face = self.fonts.title }
 
@@ -410,6 +507,18 @@ function ReadingStatsTable:buildContent()
 
     local header = buildTableHeader(self.fonts, self.layout)
     local rows = buildTableRows(stats_data, self.fonts, self.layout)
+
+    -- Build pagination bar
+    local self_ref = self
+    local pagination_frame, tap_targets = buildPaginationBar(
+        self.fonts, self.layout,
+        self.current_page, total_pages,
+        function() self_ref.current_page = 1;           self_ref:buildContent(); UIManager:setDirty(self_ref, "ui") end,
+        function() self_ref.current_page = self_ref.current_page - 1; self_ref:buildContent(); UIManager:setDirty(self_ref, "ui") end,
+        function() self_ref.current_page = self_ref.current_page + 1; self_ref:buildContent(); UIManager:setDirty(self_ref, "ui") end,
+        function() self_ref.current_page = total_pages; self_ref:buildContent(); UIManager:setDirty(self_ref, "ui") end
+    )
+    self._pagination_tap_targets = tap_targets
     
     local table_content = VerticalGroup:new{
         align = "left",
@@ -442,6 +551,11 @@ function ReadingStatsTable:buildContent()
             rows,
         },
         LineWidget:new{
+            dimen = Geom:new{ w = self.layout.full_width, h = Size.line.thin },
+            background = Blitbuffer.COLOR_LIGHT_GRAY,
+        },
+        pagination_frame,
+        LineWidget:new{
             dimen = Geom:new{ w = self.layout.full_width, h = Size.line.medium },
             background = Blitbuffer.COLOR_BLACK,
         },
@@ -462,7 +576,8 @@ function ReadingStatsTable:buildContent()
 end
 
 function ReadingStatsTable:onShow()
-    -- Rebuild with fresh data every time shown
+    -- Reset to page 1 and rebuild with fresh data every time shown
+    self.current_page = 1
     self:buildContent()
     
     UIManager:setDirty(self, function()
@@ -472,6 +587,23 @@ function ReadingStatsTable:onShow()
 end
 
 function ReadingStatsTable:onTapClose(arg, ges_ev)
+    -- Check if tap lands on a pagination button
+    if self._pagination_tap_targets and ges_ev then
+        local tap_x = ges_ev.pos and ges_ev.pos.x
+        local tap_y = ges_ev.pos and ges_ev.pos.y
+        if tap_x and tap_y then
+            for _, target in ipairs(self._pagination_tap_targets) do
+                if target.enabled and target.widget and target.widget.dimen then
+                    local d = target.widget.dimen
+                    if tap_x >= d.x and tap_x <= d.x + d.w and
+                       tap_y >= d.y and tap_y <= d.y + d.h then
+                        target.handler()
+                        return true
+                    end
+                end
+            end
+        end
+    end
     UIManager:close(self)
     return true
 end
