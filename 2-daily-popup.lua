@@ -413,7 +413,7 @@ Dispatcher:registerAction("reading_stats_table", {
     reader = true,
 })
 
-local ROWS_PER_PAGE = 3
+local ROWS_PER_PAGE = 7
 
 local ReadingStatsTable = InputContainer:extend{
     modal = true,
@@ -459,6 +459,11 @@ function ReadingStatsTable:buildContent()
     -- 1. Flush finished pages to DB
     if self.stats_plugin then
         self.stats_plugin:insertDB()
+    end
+    -- Ensure the single persistent outer container exists once
+    if not self._outer_group then
+        self._outer_group = VerticalGroup:new{}
+        self[1] = self._outer_group
     end
     
     local book_id = self.stats_plugin and self.stats_plugin.id_curr_book
@@ -567,14 +572,9 @@ function ReadingStatsTable:buildContent()
         table_content,
     }
 
-    -- Clear all existing children before re-inserting to prevent duplicates
-    for i = #self, 1, -1 do
-        self[i] = nil
-    end
-
-    self[1] = VerticalGroup:new{
-        self.popup_frame,
-    }
+    -- Replace the single child of the persistent outer group in place.
+    -- This avoids ever touching self[1] again, which prevents duplicate rendering.
+    self._outer_group[1] = self.popup_frame
 end
 
 function ReadingStatsTable:onShow()
@@ -616,6 +616,7 @@ function ReadingStatsTable:onAnyKeyPressed()
 end
 
 function ReadingStatsTable:onCloseWidget()
+    self._outer_group = nil
     UIManager:setDirty(nil, "full")
 end
 
