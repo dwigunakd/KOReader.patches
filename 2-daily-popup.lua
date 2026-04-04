@@ -70,7 +70,7 @@ end
 
 local stats_db_path = DataStorage:getSettingsDir() .. "/statistics.sqlite3"
 
-local ROWS_PER_PAGE = 3
+local ROWS_PER_PAGE = 7
 local _current_page = 1  -- module-level: persists across close/reopen cycles
 
 local function truncateTitle(title, max_chars)
@@ -465,9 +465,11 @@ function ReadingStatsTable:buildContent()
     local book_title = truncateTitle(getBookTitle(self.ui), 30)
     local days_read = getTotalDaysRead(book_id)
 
-    -- Pagination
-    local total_rows  = #all_stats
+    -- Pagination Logic
+    local total_rows = #all_stats
     local total_pages = math.max(1, math.ceil(total_rows / ROWS_PER_PAGE))
+    local has_pagination = total_rows > ROWS_PER_PAGE -- Check if nav is needed
+
     if _current_page > total_pages then _current_page = total_pages end
     if _current_page < 1 then _current_page = 1 end
 
@@ -481,14 +483,12 @@ function ReadingStatsTable:buildContent()
     local title_text = string.format("%s - %d %s", book_title, days_read, _("Days Reading"))
     local title = TextWidget:new{ text = title_text, face = self.fonts.title }
 
-    -- 2. Get duration from database (finished pages)
+    -- Session duration calculations
     local session_duration = getCurrentSessionDuration(
         book_id,
         self.stats_plugin and self.stats_plugin.start_current_period
     )
 
-    -- 3. ADD THE LIVE SECONDS (The missing part)
-    -- If we are currently on a page, calculate how long we've been here
     if self.stats_plugin and self.stats_plugin.page_start_time then
         local live_seconds = os.time() - self.stats_plugin.page_start_time
         if live_seconds > 0 then
@@ -502,10 +502,9 @@ function ReadingStatsTable:buildContent()
     local header = buildTableHeader(self.fonts, self.layout)
     local rows = buildTableRows(stats_data, self.fonts, self.layout)
 
-    local pagination_frame, hits = buildPaginationBar(
-        self.fonts, self.layout, _current_page, total_pages)
-    self._pagination_hits = hits
-    
+    -- Prepare Table Content Group
+    local table_content = VerticalGroup:new{ align = "left" }
+
     local title_frame = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
         bordersize = 0,
@@ -533,39 +532,43 @@ function ReadingStatsTable:buildContent()
         padding_right = self.layout.padding_h,
         rows,
     }
-    local sep_line = LineWidget:new{
-        dimen = Geom:new{ w = self.layout.full_width, h = Size.line.thin },
-        background = Blitbuffer.COLOR_LIGHT_GRAY,
-    }
 
-    -- Y position of the pagination bar = sum of all heights above it
-    self._pagination_bar_y = title_frame:getSize().h
-                           + session_frame:getSize().h
-                           + header:getSize().h
-                           + rows_frame:getSize().h
-                           + sep_line:getSize().h
+    table.insert(table_content, title_frame)
+    table.insert(table_content, session_frame)
+    table.insert(table_content, header)
+    table.insert(table_content, rows_frame)
+
+    -- Running height tracker for hit detection
+    local current_y = title_frame:getSize().h + session_frame:getSize().h + header:getSize().h + rows_frame:getSize().h
+
+    -- Only add pagination elements if more than one page exists
+    if has_pagination then
+        local sep_line = LineWidget:new{
+            dimen = Geom:new{ w = self.layout.full_width, h = Size.line.thin },
+            background = Blitbuffer.COLOR_LIGHT_GRAY,
+        }
+        local pagination_frame, hits = buildPaginationBar(self.fonts, self.layout, _current_page, total_pages)
+        
+        self._pagination_hits = hits
+        self._pagination_bar_y = current_y + sep_line:getSize().h
+        
+        table.insert(table_content, sep_line)
+        table.insert(table_content, pagination_frame)
+        
+        current_y = self._pagination_bar_y + pagination_frame:getSize().h
+    else
+        self._pagination_hits = nil
+        self._pagination_bar_y = nil
+    end
 
     local bottom_line = LineWidget:new{
         dimen = Geom:new{ w = self.layout.full_width, h = Size.line.medium },
         background = Blitbuffer.COLOR_BLACK,
     }
+    table.insert(table_content, bottom_line)
 
-    -- Bottom edge of popup = everything including the pagination bar and bottom line
-    self._popup_bottom_y = self._pagination_bar_y
-                         + pagination_frame:getSize().h
-                         + bottom_line:getSize().h
+    self._popup_bottom_y = current_y + bottom_line:getSize().h
 
-    local table_content = VerticalGroup:new{
-        align = "left",
-        title_frame,
-        session_frame,
-        header,
-        rows_frame,
-        sep_line,
-        pagination_frame,
-        bottom_line,
-    }
-    
     self.popup_frame = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
         bordersize = 0,
