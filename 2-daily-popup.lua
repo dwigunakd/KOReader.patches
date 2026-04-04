@@ -69,6 +69,9 @@ end
 
 local stats_db_path = DataStorage:getSettingsDir() .. "/statistics.sqlite3"
 
+local ROWS_PER_PAGE = 3
+local _current_page = 1  -- module-level: persists across close/reopen cycles
+
 local function truncateTitle(title, max_chars)
     if not title then return "" end
     if #title > max_chars then
@@ -328,15 +331,13 @@ local function buildTableRows(stats_data, fonts, layout)
     return rows
 end
 
-local function buildPaginationBar(fonts, layout, current_page, total_pages, on_first, on_prev, on_next, on_last)
-
-    local function makeBtn(label, enabled, handler)
-        local face = enabled and fonts.cell or fonts.header
+local function buildPaginationBar(fonts, layout, current_page, total_pages, nav_callback)
+    local function makeBtn(label, enabled)
         local txt = TextWidget:new{
             text = label,
-            face = face,
+            face = enabled and fonts.cell or fonts.header,
         }
-        local btn = FrameContainer:new{
+        return FrameContainer:new{
             background = Blitbuffer.COLOR_WHITE,
             bordersize = 0,
             padding_top    = Screen:scaleBySize(4),
@@ -345,47 +346,42 @@ local function buildPaginationBar(fonts, layout, current_page, total_pages, on_f
             padding_right  = Screen:scaleBySize(6),
             txt,
         }
-        if enabled and handler then
-            btn.handler = handler
-        end
-        return btn
     end
 
-    local page_label = TextWidget:new{
+    local first_btn = makeBtn("«", current_page > 1)
+    local prev_btn  = makeBtn("‹", current_page > 1)
+    local page_lbl  = TextWidget:new{
         text = string.format("%d / %d", current_page, total_pages),
         face = fonts.cell,
     }
+    local next_btn  = makeBtn("›", current_page < total_pages)
+    local last_btn  = makeBtn("»", current_page < total_pages)
 
-    local bar = HorizontalGroup:new{ align = "center" }
-    -- Push the bar to the right with a flexible left span
-    local bar_inner = HorizontalGroup:new{ align = "center" }
+    local bar_inner = HorizontalGroup:new{ align = "center",
+        first_btn,
+        HorizontalSpan:new{ width = Screen:scaleBySize(6) },
+        prev_btn,
+        HorizontalSpan:new{ width = Screen:scaleBySize(10) },
+        page_lbl,
+        HorizontalSpan:new{ width = Screen:scaleBySize(10) },
+        next_btn,
+        HorizontalSpan:new{ width = Screen:scaleBySize(6) },
+        last_btn,
+    }
 
-    local first_btn = makeBtn("«", current_page > 1, on_first)
-    local prev_btn  = makeBtn("‹", current_page > 1, on_prev)
-    local next_btn  = makeBtn("›", current_page < total_pages, on_next)
-    local last_btn  = makeBtn("»", current_page < total_pages, on_last)
-
-    table.insert(bar_inner, first_btn)
-    table.insert(bar_inner, HorizontalSpan:new{ width = Screen:scaleBySize(6) })
-    table.insert(bar_inner, prev_btn)
-    table.insert(bar_inner, HorizontalSpan:new{ width = Screen:scaleBySize(10) })
-    table.insert(bar_inner, page_label)
-    table.insert(bar_inner, HorizontalSpan:new{ width = Screen:scaleBySize(10) })
-    table.insert(bar_inner, next_btn)
-    table.insert(bar_inner, HorizontalSpan:new{ width = Screen:scaleBySize(6) })
-    table.insert(bar_inner, last_btn)
-
-    -- Right-aligned: fill remaining space on the left
-    local btn_total_w = first_btn:getSize().w + prev_btn:getSize().w
-                      + next_btn:getSize().w + last_btn:getSize().w
-    local bar_inner_w = btn_total_w + Screen:scaleBySize(6 + 10 + 10 + 6) + page_label:getSize().w
-    local left_fill = layout.full_width - 2 * layout.padding_h - bar_inner_w
+    local inner_w = first_btn:getSize().w + prev_btn:getSize().w
+                  + page_lbl:getSize().w
+                  + next_btn:getSize().w + last_btn:getSize().w
+                  + Screen:scaleBySize(6 + 10 + 10 + 6)
+    local left_fill = layout.full_width - 2 * layout.padding_h - inner_w
     if left_fill < 0 then left_fill = 0 end
 
-    table.insert(bar, HorizontalSpan:new{ width = left_fill })
-    table.insert(bar, bar_inner)
+    local bar = HorizontalGroup:new{ align = "center",
+        HorizontalSpan:new{ width = left_fill },
+        bar_inner,
+    }
 
-    local pagination_frame = FrameContainer:new{
+    local frame = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
         bordersize = 0,
         padding_top    = Size.padding.default,
@@ -395,15 +391,15 @@ local function buildPaginationBar(fonts, layout, current_page, total_pages, on_f
         bar,
     }
 
-    -- Collect tappable buttons and their handlers for gesture dispatch
-    local tap_targets = {
-        { widget = first_btn, handler = on_first, enabled = current_page > 1 },
-        { widget = prev_btn,  handler = on_prev,  enabled = current_page > 1 },
-        { widget = next_btn,  handler = on_next,  enabled = current_page < total_pages },
-        { widget = last_btn,  handler = on_last,  enabled = current_page < total_pages },
+    -- Store hit-test info: each button's page target
+    local hits = {
+        { widget = first_btn, enabled = current_page > 1,            target = 1 },
+        { widget = prev_btn,  enabled = current_page > 1,            target = current_page - 1 },
+        { widget = next_btn,  enabled = current_page < total_pages,  target = current_page + 1 },
+        { widget = last_btn,  enabled = current_page < total_pages,  target = total_pages },
     }
 
-    return pagination_frame, tap_targets
+    return frame, hits
 end
 
 Dispatcher:registerAction("reading_stats_table", {
@@ -413,12 +409,9 @@ Dispatcher:registerAction("reading_stats_table", {
     reader = true,
 })
 
-local ROWS_PER_PAGE = 7
-
 local ReadingStatsTable = InputContainer:extend{
     modal = true,
     ui = nil,
-    current_page = 1,
 }
 
 function ReadingStatsTable:init()
@@ -460,24 +453,19 @@ function ReadingStatsTable:buildContent()
     if self.stats_plugin then
         self.stats_plugin:insertDB()
     end
-    -- Ensure the single persistent outer container exists once
-    if not self._outer_group then
-        self._outer_group = VerticalGroup:new{}
-        self[1] = self._outer_group
-    end
     
     local book_id = self.stats_plugin and self.stats_plugin.id_curr_book
     local all_stats = getReadingStatsForDays(book_id, 365)
     local book_title = truncateTitle(getBookTitle(self.ui), 30)
     local days_read = getTotalDaysRead(book_id)
-    
-    -- Pagination calculations
+
+    -- Pagination
     local total_rows  = #all_stats
     local total_pages = math.max(1, math.ceil(total_rows / ROWS_PER_PAGE))
-    if self.current_page > total_pages then self.current_page = total_pages end
-    if self.current_page < 1 then self.current_page = 1 end
+    if _current_page > total_pages then _current_page = total_pages end
+    if _current_page < 1 then _current_page = 1 end
 
-    local page_start = (self.current_page - 1) * ROWS_PER_PAGE + 1
+    local page_start = (_current_page - 1) * ROWS_PER_PAGE + 1
     local page_end   = math.min(page_start + ROWS_PER_PAGE - 1, total_rows)
     local stats_data = {}
     for i = page_start, page_end do
@@ -504,23 +492,13 @@ function ReadingStatsTable:buildContent()
 
     local session_text = string.format("%s %s", formatSeconds(session_duration), _("reading in this session"))
     local session_widget = TextWidget:new{ text = session_text, face = self.fonts.session }
-    
-    -- ... rest of the function (header, rows, layout) stays the same
 
     local header = buildTableHeader(self.fonts, self.layout)
     local rows = buildTableRows(stats_data, self.fonts, self.layout)
 
-    -- Build pagination bar
-    local self_ref = self
-    local pagination_frame, tap_targets = buildPaginationBar(
-        self.fonts, self.layout,
-        self.current_page, total_pages,
-        function() self_ref.current_page = 1;           self_ref:buildContent(); UIManager:setDirty(self_ref, "ui") end,
-        function() self_ref.current_page = self_ref.current_page - 1; self_ref:buildContent(); UIManager:setDirty(self_ref, "ui") end,
-        function() self_ref.current_page = self_ref.current_page + 1; self_ref:buildContent(); UIManager:setDirty(self_ref, "ui") end,
-        function() self_ref.current_page = total_pages; self_ref:buildContent(); UIManager:setDirty(self_ref, "ui") end
-    )
-    self._pagination_tap_targets = tap_targets
+    local pagination_frame, hits = buildPaginationBar(
+        self.fonts, self.layout, _current_page, total_pages)
+    self._pagination_hits = hits
     
     local table_content = VerticalGroup:new{
         align = "left",
@@ -572,16 +550,10 @@ function ReadingStatsTable:buildContent()
         table_content,
     }
 
-    -- Replace the single child of the persistent outer group in place.
-    -- This avoids ever touching self[1] again, which prevents duplicate rendering.
-    self._outer_group[1] = self.popup_frame
+    self[1] = self.popup_frame
 end
 
 function ReadingStatsTable:onShow()
-    -- Reset to page 1 and rebuild with fresh data every time shown
-    self.current_page = 1
-    self:buildContent()
-    
     UIManager:setDirty(self, function()
         return "full", self.dimen
     end)
@@ -589,19 +561,21 @@ function ReadingStatsTable:onShow()
 end
 
 function ReadingStatsTable:onTapClose(arg, ges_ev)
-    -- Check if tap lands on a pagination button
-    if self._pagination_tap_targets and ges_ev then
-        local tap_x = ges_ev.pos and ges_ev.pos.x
-        local tap_y = ges_ev.pos and ges_ev.pos.y
-        if tap_x and tap_y then
-            for _, target in ipairs(self._pagination_tap_targets) do
-                if target.enabled and target.widget and target.widget.dimen then
-                    local d = target.widget.dimen
-                    if tap_x >= d.x and tap_x <= d.x + d.w and
-                       tap_y >= d.y and tap_y <= d.y + d.h then
-                        target.handler()
-                        return true
-                    end
+    -- Check pagination button hits
+    if self._pagination_hits and ges_ev and ges_ev.pos then
+        local tx, ty = ges_ev.pos.x, ges_ev.pos.y
+        for _, hit in ipairs(self._pagination_hits) do
+            if hit.enabled and hit.widget and hit.widget.dimen then
+                local d = hit.widget.dimen
+                if tx >= d.x and tx <= d.x + d.w and ty >= d.y and ty <= d.y + d.h then
+                    -- Close current popup, update page, reopen fresh — the only
+                    -- correct way to avoid duplicate widget rendering in KOReader
+                    local ui_ref = self.ui
+                    _current_page = hit.target
+                    UIManager:close(self)
+                    local new_popup = ReadingStatsTable:new{ ui = ui_ref }
+                    UIManager:show(new_popup)
+                    return true
                 end
             end
         end
@@ -616,11 +590,11 @@ function ReadingStatsTable:onAnyKeyPressed()
 end
 
 function ReadingStatsTable:onCloseWidget()
-    self._outer_group = nil
     UIManager:setDirty(nil, "full")
 end
 
 function ReaderUI.onShowReadingStatsTable(this)
+    _current_page = 1
     local popup = ReadingStatsTable:new{
         ui = this,
     }
