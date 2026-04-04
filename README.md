@@ -10,6 +10,6 @@ This patch add kobo inspired style screensaver to your device, to enable this go
 <img width="1272" height="1696" alt="Reader_It&#39;s Not Her epub_p401_2026-04-04_093708" src="https://github.com/user-attachments/assets/aef7f96f-6efb-4966-9727-54577dda4542" />
 
 ### [🞂 Reading History](https://github.com/dwigunakd/KOReader.patches/blob/main/2-daily-popup.lua)
-This patch that adds a popup table showing daily reading history for the current book. It displays recent reading activity in a clean, table-style layout, similar to the statistics plugin but focused on per-day breakdown, to enable this you need to set this as Taps and gestures action. On Gesture manager choose gesture you want then choose Reader -> Reading History. Once triggered, it will open a popup showing your recent reading stats.
+This patch adds a popup table showing daily reading history for the current book. It displays recent reading activity in a clean, table-style layout, similar to the statistics plugin but focused on per-day breakdown, to enable this you need to set this as Taps and gestures action. On Gesture manager choose gesture you want then choose Reader -> Reading History. When triggered, a popup will appear displaying the reading history of the current book.
 #### Screenshot : 
 <img width="1272" height="1696" alt="Reader_It&#39;s Not Her epub_p401_2026-04-04_093555" src="https://github.com/user-attachments/assets/b45387b5-39f8-4664-91cd-ae799b125176" />
