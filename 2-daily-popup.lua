@@ -428,10 +428,10 @@ function ReadingStatsTable:init()
     self.screen_h = screen_h
     
     self.fonts = {
-        header  = Font:getFace("RakutenSerifApp-Bold.ttf", 18),
-        cell    = Font:getFace("RakutenSerifApp-Bold.ttf", 20),
-        title   = Font:getFace("RakutenSerifApp-Bold.ttf", 24),
-        session = Font:getFace("RakutenSerifApp-Bold.ttf", 18),
+        header  = Font:getFace("NotoSerif-Bold.ttf", 18),
+        cell    = Font:getFace("NotoSerif-Bold.ttf", 20),
+        title   = Font:getFace("NotoSerif-Bold.ttf", 24),
+        session = Font:getFace("NotoSerif-Bold.ttf", 18),
     }
     
     self.layout = buildLayout(screen_w, Size.padding.large, Screen:scaleBySize(10))
