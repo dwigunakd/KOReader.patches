@@ -329,9 +329,6 @@ local function buildTableRows(stats_data, fonts, layout)
 end
 
 local function buildPaginationBar(fonts, layout, current_page, total_pages, on_first, on_prev, on_next, on_last)
-    -- Button builder: returns a tappable TextWidget wrapped in a FrameContainer
-    local btn_w = Screen:scaleBySize(44)
-    local btn_h = Screen:scaleBySize(32)
 
     local function makeBtn(label, enabled, handler)
         local face = enabled and fonts.cell or fonts.header
@@ -340,14 +337,12 @@ local function buildPaginationBar(fonts, layout, current_page, total_pages, on_f
             face = face,
         }
         local btn = FrameContainer:new{
-            background = enabled and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_GRAY_E,
-            bordersize = Size.line.thin,
-            radius    = Screen:scaleBySize(3),
+            background = Blitbuffer.COLOR_WHITE,
+            bordersize = 0,
             padding_top    = Screen:scaleBySize(4),
             padding_bottom = Screen:scaleBySize(4),
-            padding_left   = Screen:scaleBySize(8),
-            padding_right  = Screen:scaleBySize(8),
-            dimen = Geom:new{ w = btn_w, h = btn_h },
+            padding_left   = Screen:scaleBySize(6),
+            padding_right  = Screen:scaleBySize(6),
             txt,
         }
         if enabled and handler then
@@ -381,7 +376,9 @@ local function buildPaginationBar(fonts, layout, current_page, total_pages, on_f
     table.insert(bar_inner, last_btn)
 
     -- Right-aligned: fill remaining space on the left
-    local bar_inner_w = btn_w * 4 + Screen:scaleBySize(6 + 10 + 10 + 6) + page_label:getSize().w
+    local btn_total_w = first_btn:getSize().w + prev_btn:getSize().w
+                      + next_btn:getSize().w + last_btn:getSize().w
+    local bar_inner_w = btn_total_w + Screen:scaleBySize(6 + 10 + 10 + 6) + page_label:getSize().w
     local left_fill = layout.full_width - 2 * layout.padding_h - bar_inner_w
     if left_fill < 0 then left_fill = 0 end
 
@@ -416,7 +413,7 @@ Dispatcher:registerAction("reading_stats_table", {
     reader = true,
 })
 
-local ROWS_PER_PAGE = 7
+local ROWS_PER_PAGE = 3
 
 local ReadingStatsTable = InputContainer:extend{
     modal = true,
@@ -569,6 +566,11 @@ function ReadingStatsTable:buildContent()
         width = self.screen_w,
         table_content,
     }
+
+    -- Clear all existing children before re-inserting to prevent duplicates
+    for i = #self, 1, -1 do
+        self[i] = nil
+    end
 
     self[1] = VerticalGroup:new{
         self.popup_frame,
