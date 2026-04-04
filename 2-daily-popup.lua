@@ -17,6 +17,7 @@ local GestureRange = require("ui/gesturerange")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local InputContainer = require("ui/widget/container/inputcontainer")
+local CenterContainer = require("ui/widget/container/centercontainer")
 local LeftContainer = require("ui/widget/container/leftcontainer")
 local LineWidget = require("ui/widget/linewidget")
 local Math = require("optmath")
@@ -331,72 +332,77 @@ local function buildTableRows(stats_data, fonts, layout)
     return rows
 end
 
-local function buildPaginationBar(fonts, layout, current_page, total_pages, nav_callback)
-    local function makeBtn(label, enabled)
-        local txt = TextWidget:new{
-            text = label,
-            face = enabled and fonts.cell or fonts.header,
-        }
-        return FrameContainer:new{
-            background = Blitbuffer.COLOR_WHITE,
-            bordersize = 0,
-            padding_top    = Screen:scaleBySize(4),
-            padding_bottom = Screen:scaleBySize(4),
-            padding_left   = Screen:scaleBySize(6),
-            padding_right  = Screen:scaleBySize(6),
-            txt,
+local function buildPaginationBar(fonts, layout, current_page, total_pages)
+    local bar_h  = Screen:scaleBySize(48)
+    local full_w = layout.full_width
+
+    local can_prev = current_page > 1
+    local can_next = current_page < total_pages
+
+    -- 5 equal zones: «  ‹  1/2  ›  »
+    local zone_w = math.floor(full_w / 5)
+    -- Give the middle label zone any leftover pixels from rounding
+    local lbl_w  = full_w - zone_w * 4
+
+    local function makeZone(label, enabled, w)
+        return CenterContainer:new{
+            dimen = Geom:new{ w = w, h = bar_h },
+            TextWidget:new{
+                text = label,
+                face = enabled and fonts.cell or fonts.header,
+            },
         }
     end
 
-    local first_btn = makeBtn("«", current_page > 1)
-    local prev_btn  = makeBtn("‹", current_page > 1)
-    local page_lbl  = TextWidget:new{
+    local function makeSep()
+        return LineWidget:new{
+            dimen = Geom:new{ w = Size.line.thin, h = Screen:scaleBySize(28) },
+            background = Blitbuffer.COLOR_LIGHT_GRAY,
+        }
+    end
+
+    local page_lbl = TextWidget:new{
         text = string.format("%d / %d", current_page, total_pages),
         face = fonts.cell,
     }
-    local next_btn  = makeBtn("›", current_page < total_pages)
-    local last_btn  = makeBtn("»", current_page < total_pages)
-
-    local bar_inner = HorizontalGroup:new{ align = "center",
-        first_btn,
-        HorizontalSpan:new{ width = Screen:scaleBySize(6) },
-        prev_btn,
-        HorizontalSpan:new{ width = Screen:scaleBySize(10) },
+    local lbl_zone = CenterContainer:new{
+        dimen = Geom:new{ w = lbl_w, h = bar_h },
         page_lbl,
-        HorizontalSpan:new{ width = Screen:scaleBySize(10) },
-        next_btn,
-        HorizontalSpan:new{ width = Screen:scaleBySize(6) },
-        last_btn,
     }
 
-    local inner_w = first_btn:getSize().w + prev_btn:getSize().w
-                  + page_lbl:getSize().w
-                  + next_btn:getSize().w + last_btn:getSize().w
-                  + Screen:scaleBySize(6 + 10 + 10 + 6)
-    local left_fill = layout.full_width - 2 * layout.padding_h - inner_w
-    if left_fill < 0 then left_fill = 0 end
+    local z_first = makeZone("«", can_prev, zone_w)
+    local z_prev  = makeZone("‹", can_prev, zone_w)
+    local z_next  = makeZone("›", can_next, zone_w)
+    local z_last  = makeZone("»", can_next, zone_w)
 
     local bar = HorizontalGroup:new{ align = "center",
-        HorizontalSpan:new{ width = left_fill },
-        bar_inner,
+        z_first, makeSep(),
+        z_prev,  makeSep(),
+        lbl_zone, makeSep(),
+        z_next,  makeSep(),
+        z_last,
     }
 
     local frame = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
         bordersize = 0,
-        padding_top    = Size.padding.default,
-        padding_bottom = Size.padding.default,
-        padding_left   = layout.padding_h,
-        padding_right  = layout.padding_h,
+        padding    = 0,
         bar,
     }
 
-    -- Store hit-test info: each button's page target
+    -- Pre-calculated X ranges for each zone (no widget.dimen needed)
+    local x0 = 0
+    local x1 = zone_w          -- «  ends here
+    local x2 = zone_w * 2      -- ‹  ends here
+    local x3 = zone_w * 2 + lbl_w  -- label ends here
+    local x4 = x3 + zone_w     -- ›  ends here
+    -- »  ends at full_w
+
     local hits = {
-        { widget = first_btn, enabled = current_page > 1,            target = 1 },
-        { widget = prev_btn,  enabled = current_page > 1,            target = current_page - 1 },
-        { widget = next_btn,  enabled = current_page < total_pages,  target = current_page + 1 },
-        { widget = last_btn,  enabled = current_page < total_pages,  target = total_pages },
+        { enabled = can_prev, target = 1,                  x_min = x0, x_max = x1 },
+        { enabled = can_prev, target = current_page - 1,   x_min = x1, x_max = x2 },
+        { enabled = can_next, target = current_page + 1,   x_min = x3, x_max = x4 },
+        { enabled = can_next, target = total_pages,         x_min = x4, x_max = full_w },
     }
 
     return frame, hits
@@ -500,45 +506,64 @@ function ReadingStatsTable:buildContent()
         self.fonts, self.layout, _current_page, total_pages)
     self._pagination_hits = hits
     
+    local title_frame = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = 0,
+        padding_top = Size.padding.large,
+        padding_bottom = Size.padding.small,
+        padding_left = self.layout.padding_h,
+        padding_right = self.layout.padding_h,
+        title,
+    }
+    local session_frame = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = 0,
+        padding_top = 0,
+        padding_bottom = Size.padding.default,
+        padding_left = self.layout.padding_h,
+        padding_right = self.layout.padding_h,
+        session_widget,
+    }
+    local rows_frame = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = 0,
+        padding_top = Size.padding.default,
+        padding_bottom = Size.padding.default,
+        padding_left = self.layout.padding_h,
+        padding_right = self.layout.padding_h,
+        rows,
+    }
+    local sep_line = LineWidget:new{
+        dimen = Geom:new{ w = self.layout.full_width, h = Size.line.thin },
+        background = Blitbuffer.COLOR_LIGHT_GRAY,
+    }
+
+    -- Y position of the pagination bar = sum of all heights above it
+    self._pagination_bar_y = title_frame:getSize().h
+                           + session_frame:getSize().h
+                           + header:getSize().h
+                           + rows_frame:getSize().h
+                           + sep_line:getSize().h
+
+    local bottom_line = LineWidget:new{
+        dimen = Geom:new{ w = self.layout.full_width, h = Size.line.medium },
+        background = Blitbuffer.COLOR_BLACK,
+    }
+
+    -- Bottom edge of popup = everything including the pagination bar and bottom line
+    self._popup_bottom_y = self._pagination_bar_y
+                         + pagination_frame:getSize().h
+                         + bottom_line:getSize().h
+
     local table_content = VerticalGroup:new{
         align = "left",
-        FrameContainer:new{
-            background = Blitbuffer.COLOR_WHITE,
-            bordersize = 0,
-            padding_top = Size.padding.large,
-            padding_bottom = Size.padding.small,
-            padding_left = self.layout.padding_h,
-            padding_right = self.layout.padding_h,
-            title,
-        },
-        FrameContainer:new{
-            background = Blitbuffer.COLOR_WHITE,
-            bordersize = 0,
-            padding_top = 0,
-            padding_bottom = Size.padding.default,
-            padding_left = self.layout.padding_h,
-            padding_right = self.layout.padding_h,
-            session_widget,
-        },
+        title_frame,
+        session_frame,
         header,
-        FrameContainer:new{
-            background = Blitbuffer.COLOR_WHITE,
-            bordersize = 0,
-            padding_top = Size.padding.default,
-            padding_bottom = Size.padding.default,
-            padding_left = self.layout.padding_h,
-            padding_right = self.layout.padding_h,
-            rows,
-        },
-        LineWidget:new{
-            dimen = Geom:new{ w = self.layout.full_width, h = Size.line.thin },
-            background = Blitbuffer.COLOR_LIGHT_GRAY,
-        },
+        rows_frame,
+        sep_line,
         pagination_frame,
-        LineWidget:new{
-            dimen = Geom:new{ w = self.layout.full_width, h = Size.line.medium },
-            background = Blitbuffer.COLOR_BLACK,
-        },
+        bottom_line,
     }
     
     self.popup_frame = FrameContainer:new{
@@ -561,25 +586,39 @@ function ReadingStatsTable:onShow()
 end
 
 function ReadingStatsTable:onTapClose(arg, ges_ev)
-    -- Check pagination button hits
-    if self._pagination_hits and ges_ev and ges_ev.pos then
-        local tx, ty = ges_ev.pos.x, ges_ev.pos.y
-        for _, hit in ipairs(self._pagination_hits) do
-            if hit.enabled and hit.widget and hit.widget.dimen then
-                local d = hit.widget.dimen
-                if tx >= d.x and tx <= d.x + d.w and ty >= d.y and ty <= d.y + d.h then
-                    -- Close current popup, update page, reopen fresh — the only
-                    -- correct way to avoid duplicate widget rendering in KOReader
-                    local ui_ref = self.ui
-                    _current_page = hit.target
-                    UIManager:close(self)
-                    local new_popup = ReadingStatsTable:new{ ui = ui_ref }
-                    UIManager:show(new_popup)
-                    return true
+    if ges_ev and ges_ev.pos then
+        local tx = ges_ev.pos.x
+        local ty = ges_ev.pos.y
+        local bar_y      = self._pagination_bar_y or 0
+        local popup_bot  = self._popup_bottom_y   or 0
+
+        -- Tap is inside the popup (above the bottom edge)
+        if ty <= popup_bot then
+            -- Tap is in the pagination bar row
+            if ty >= bar_y and self._pagination_hits then
+                for _, hit in ipairs(self._pagination_hits) do
+                    if hit.enabled and tx >= hit.x_min and tx <= hit.x_max then
+                        local ui_ref = self.ui
+                        local target = hit.target
+                        UIManager:close(self)
+                        -- Defer reopen so this tap event is fully consumed first,
+                        -- preventing it from immediately closing the new popup.
+                        UIManager:scheduleIn(0, function()
+                            _current_page = target
+                            local new_popup = ReadingStatsTable:new{ ui = ui_ref }
+                            UIManager:show(new_popup)
+                        end)
+                        return true
+                    end
                 end
+                -- Tapped bar area but disabled zone — swallow only
+                return true
             end
+            -- Tapped inside popup content (table rows etc.) — swallow, don't close
+            return true
         end
     end
+    -- Tapped outside popup — close
     UIManager:close(self)
     return true
 end
