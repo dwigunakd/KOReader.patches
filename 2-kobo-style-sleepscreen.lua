@@ -449,8 +449,8 @@ local function buildLastReadReceipt(cover_widget)
         border_size = 1
     end
 
-    local label_face = Font:getFace("NotoSerif-Regular.ttf", Screen:scaleBySize(9))
-    local title_face = Font:getFace("NotoSerif-Regular.ttf", Screen:scaleBySize(11))
+    local label_face = Font:getFace("NotoSerif-Regular.ttf", Screen:scaleBySize(10))
+    local title_face = Font:getFace("NotoSerif-Regular.ttf", Screen:scaleBySize(9))
 
     local summary_text = last_read_snapshot.title
     if last_read_snapshot.percentage then
