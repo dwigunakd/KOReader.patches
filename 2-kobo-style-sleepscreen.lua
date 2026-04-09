@@ -26,6 +26,8 @@ local Screen = Device.screen
 
 local STATISTICS_DB_PATH = DataStorage:getSettingsDir() .. "/statistics.sqlite3"
 local KOBO_STYLE_DARK_MODE_SETTING = "kobo_style_screensaver_dark_mode"
+local LAST_READ_LABEL = _("Last Read")
+local last_read_snapshot = {}
 
 -- [All your original helper functions remain unchanged: truncateAtColon, utf8Len, utf8Sub, 
 -- hasActiveDocument, getBookTodayDuration, formatDuration, getActiveDocumentCover, buildBackgroundCover]
@@ -75,6 +77,41 @@ end
 
 local function hasActiveDocument(ui)
     return ui and ui.document ~= nil
+end
+
+local function getDocumentTitle(ui)
+    local doc_props = ui and ui.doc_props or {}
+    return truncateAtColon(doc_props.display_title or "") or "Untitled"
+end
+
+local function getPageProgress(ui, state)
+    local doc_page_no = (state and state.page) or 1
+    local doc_settings = ui and ui.doc_settings and ui.doc_settings.data or {}
+    local doc_page_total = doc_settings.doc_pages or 1
+
+    if doc_page_total <= 0 then doc_page_total = 1 end
+    if doc_page_no < 1 then doc_page_no = 1 end
+    if doc_page_no > doc_page_total then doc_page_no = doc_page_total end
+
+    local page_no_numeric = doc_page_no
+    local page_total_numeric = doc_page_total
+
+    if ui and ui.pagemap and ui.pagemap:wantsPageLabels() then
+        local _, idx, count = ui.pagemap:getCurrentPageLabel(true)
+        if idx and count then
+            page_no_numeric = idx
+            page_total_numeric = count
+        end
+    end
+
+    local percentage = math.floor((page_no_numeric / page_total_numeric) * 100 + 0.5)
+    return {
+        doc_page_no = doc_page_no,
+        doc_page_total = doc_page_total,
+        page_no_numeric = page_no_numeric,
+        page_total_numeric = page_total_numeric,
+        percentage = percentage,
+    }
 end
 
 local function getBookTodayDuration(statistics)
@@ -141,8 +178,7 @@ local function getActiveDocumentCover(ui)
     return ui.bookinfo:getCoverImage(ui.document)
 end
 
-local function buildBackgroundCover(ui)
-    local cover_bb = getActiveDocumentCover(ui)
+local function buildScaledCoverWidget(cover_bb)
     if not cover_bb then return nil end
     local screen_size = Screen:getSize()
     local scaled_bb = RenderImage:scaleBlitBuffer(cover_bb, screen_size.w, screen_size.h, true)
@@ -154,13 +190,30 @@ local function buildBackgroundCover(ui)
     }
 end
 
+local function updateLastReadSnapshot(ui, state)
+    if not hasActiveDocument(ui) then return end
+
+    local progress = getPageProgress(ui, state)
+    local cover_bb = getActiveDocumentCover(ui)
+
+    last_read_snapshot = {
+        title = getDocumentTitle(ui),
+        percentage = progress and progress.percentage or nil,
+        cover_widget = buildScaledCoverWidget(cover_bb),
+    }
+end
+
+local function buildBackgroundCover(ui)
+    local cover_bb = getActiveDocumentCover(ui)
+    return buildScaledCoverWidget(cover_bb)
+end
+
 local function buildKoboStyleReceipt(ui, state)
     if not hasActiveDocument(ui) then return nil end
 
-    local doc_props = ui.doc_props or {}
-    local book_title = truncateAtColon(doc_props.display_title or "") or "Untitled"
-
-    local doc_page_no = (state and state.page) or 1
+    local book_title = getDocumentTitle(ui)
+    local progress = getPageProgress(ui, state)
+    local doc_page_no = progress.doc_page_no
     local toc = ui.toc
     local chapter_title = ""
     if toc then
@@ -171,25 +224,10 @@ local function buildKoboStyleReceipt(ui, state)
         end  
     end  
 
-    local doc_settings = ui.doc_settings and ui.doc_settings.data or {}
-    local doc_page_total = doc_settings.doc_pages or 1
-    if doc_page_total <= 0 then doc_page_total = 1 end
-    if doc_page_no < 1 then doc_page_no = 1 end
-    if doc_page_no > doc_page_total then doc_page_no = doc_page_total end
-
-    local page_no_numeric = doc_page_no
-    local page_total_numeric = doc_page_total
-
-    if ui.pagemap and ui.pagemap:wantsPageLabels() then
-        local _, idx, count = ui.pagemap:getCurrentPageLabel(true)
-        if idx and count then
-            page_no_numeric = idx
-            page_total_numeric = count
-        end
-    end
-
+    local page_no_numeric = progress.page_no_numeric
+    local page_total_numeric = progress.page_total_numeric
     local page_left = math.max(page_total_numeric - page_no_numeric, 0)
-    local percentage = math.floor((page_no_numeric / page_total_numeric) * 100 + 0.5)
+    local percentage = progress.percentage
 
     local statistics = ui.statistics
     local avg_time = statistics and statistics.avg_time
@@ -341,6 +379,119 @@ local function buildKoboStyleReceipt(ui, state)
     end
 end
 
+local function buildLastReadReceipt()
+    if not last_read_snapshot.title or last_read_snapshot.title == "" then
+        return nil
+    end
+
+    local screen_size = Screen:getSize()
+    local padding = Screen:scaleBySize(12)
+    local box_width = math.floor(screen_size.w * 0.55)
+
+    local dark_mode = G_reader_settings:isTrue(KOBO_STYLE_DARK_MODE_SETTING)
+    local bg_color, text_color, text_color_light, border_color, border_size
+    if dark_mode then
+        bg_color = Blitbuffer.COLOR_BLACK
+        text_color = Blitbuffer.COLOR_WHITE
+        text_color_light = Blitbuffer.COLOR_GRAY_E
+        border_color = Blitbuffer.COLOR_WHITE
+        border_size = 1
+    else
+        bg_color = Blitbuffer.COLOR_WHITE
+        text_color = Blitbuffer.COLOR_BLACK
+        text_color_light = Blitbuffer.COLOR_GRAY_3
+        border_color = Blitbuffer.COLOR_BLACK
+        border_size = 1
+    end
+
+    local label_face = Font:getFace("NotoSerif-Regular.ttf", Screen:scaleBySize(9))
+    local title_face = Font:getFace("NotoSerif-Regular.ttf", Screen:scaleBySize(11))
+
+    local summary_text = last_read_snapshot.title
+    if last_read_snapshot.percentage then
+        summary_text = string.format("%s · %d%%", last_read_snapshot.title, last_read_snapshot.percentage)
+    end
+
+    local box_content = VerticalGroup:new{
+        align = "left",
+        TextWidget:new{
+            text = LAST_READ_LABEL,
+            face = label_face,
+            fgcolor = text_color_light,
+            bold = true,
+        },
+        TextBoxWidget:new{
+            text = summary_text,
+            face = title_face,
+            fgcolor = text_color,
+            bgcolor = bg_color,
+            width = box_width - Screen:scaleBySize(28),
+            alignment = "left",
+            bold = true,
+            line_height = 0.3,
+        },
+    }
+
+    local info_box = FrameContainer:new{
+        background = bg_color,
+        bordersize = border_size,
+        color = border_color,
+        radius = 0,
+        padding = padding,
+        box_content,
+    }
+
+    local margin_left = 0
+    local margin_bottom = Screen:scaleBySize(100)
+    local box_height = info_box:getSize().h
+
+    local positioned_box = OverlapGroup:new{
+        dimen = screen_size,
+        VerticalGroup:new{
+            VerticalSpan:new{ width = screen_size.h - box_height - margin_bottom },
+            HorizontalGroup:new{
+                HorizontalSpan:new{ width = margin_left },
+                info_box,
+            },
+        },
+    }
+
+    if last_read_snapshot.cover_widget then
+        return OverlapGroup:new{
+            dimen = screen_size,
+            last_read_snapshot.cover_widget,
+            positioned_box,
+        }
+    end
+
+    return OverlapGroup:new{
+        dimen = screen_size,
+        positioned_box,
+    }
+end
+
+local function cacheLastReadFromUI(ui)
+    if not ui then return end
+    local state = ui.view and ui.view.state
+    pcall(updateLastReadSnapshot, ui, state)
+end
+
+if type(ReaderUI.onCloseWidget) == "function" then
+    local orig_readerui_onclosewidget = ReaderUI.onCloseWidget
+    ReaderUI.onCloseWidget = function(self, ...)
+        cacheLastReadFromUI(self)
+        return orig_readerui_onclosewidget(self, ...)
+    end
+end
+
+if type(ReaderUI.onClose) == "function" then
+    local orig_readerui_onclose = ReaderUI.onClose
+    ReaderUI.onClose = function(self, ...)
+        cacheLastReadFromUI(self)
+        return orig_readerui_onclose(self, ...)
+    end
+end
+
 -- Screensaver integration (dynamic background for dark mode)
 local Screensaver = require("ui/screensaver")
 local orig_screensaver_show = Screensaver.show
@@ -351,8 +502,10 @@ Screensaver.show = function(self)
     end
 
     local ui = self.ui or ReaderUI.instance
-    if not hasActiveDocument(ui) then
-        return orig_screensaver_show(self)
+    local state = ui and ui.view and ui.view.state
+
+    if hasActiveDocument(ui) then
+        updateLastReadSnapshot(ui, state)
     end
 
     if self.screensaver_widget then
@@ -370,8 +523,7 @@ Screensaver.show = function(self)
         Device.orig_rotation_mode = nil
     end
 
-    local state = ui and ui.view and ui.view.state
-    local receipt_widget = buildKoboStyleReceipt(ui, state)
+    local receipt_widget = buildKoboStyleReceipt(ui, state) or buildLastReadReceipt()
 
     if receipt_widget then
         local dark_mode = G_reader_settings:isTrue(KOBO_STYLE_DARK_MODE_SETTING)
@@ -432,4 +584,3 @@ _G.dofile = function(filepath)
     end
     return result
 end
-
