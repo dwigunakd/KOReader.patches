@@ -27,6 +27,9 @@ local Screen = Device.screen
 local STATISTICS_DB_PATH = DataStorage:getSettingsDir() .. "/statistics.sqlite3"
 local KOBO_STYLE_DARK_MODE_SETTING = "kobo_style_screensaver_dark_mode"
 local LAST_READ_LABEL = _("Last Read")
+local LAST_READ_TITLE_SETTING = "kobo_style_last_read_title"
+local LAST_READ_PERCENTAGE_SETTING = "kobo_style_last_read_percentage"
+local LAST_FILE_SETTING = "lastfile"
 local last_read_snapshot = {}
 
 -- [All your original helper functions remain unchanged: truncateAtColon, utf8Len, utf8Sub, 
@@ -190,17 +193,57 @@ local function buildScaledCoverWidget(cover_bb)
     }
 end
 
+local function persistLastReadSnapshot()
+    if last_read_snapshot.title and last_read_snapshot.title ~= "" then
+        G_reader_settings:saveSetting(LAST_READ_TITLE_SETTING, last_read_snapshot.title)
+    end
+
+    if last_read_snapshot.percentage ~= nil then
+        G_reader_settings:saveSetting(LAST_READ_PERCENTAGE_SETTING, last_read_snapshot.percentage)
+    else
+        G_reader_settings:delSetting(LAST_READ_PERCENTAGE_SETTING)
+    end
+end
+
+local function hydrateLastReadSnapshot()
+    if last_read_snapshot.title then return end
+
+    local title = G_reader_settings:readSetting(LAST_READ_TITLE_SETTING)
+    local percentage = G_reader_settings:readSetting(LAST_READ_PERCENTAGE_SETTING)
+
+    if title and title ~= "" then
+        last_read_snapshot.title = title
+        last_read_snapshot.percentage = tonumber(percentage)
+    end
+end
+
+local function ensureLastReadCoverWidget(ui)
+    if not ui or not ui.bookinfo then
+        return nil
+    end
+
+    local lastfile = G_reader_settings:readSetting(LAST_FILE_SETTING)
+    if not lastfile or lastfile == "" then
+        return nil
+    end
+
+    local ok, cover_bb = pcall(ui.bookinfo.getCoverImage, ui.bookinfo, ui.document, lastfile)
+    if ok and cover_bb then
+        return buildScaledCoverWidget(cover_bb)
+    end
+    return nil
+end
+
 local function updateLastReadSnapshot(ui, state)
     if not hasActiveDocument(ui) then return end
 
     local progress = getPageProgress(ui, state)
-    local cover_bb = getActiveDocumentCover(ui)
 
     last_read_snapshot = {
         title = getDocumentTitle(ui),
         percentage = progress and progress.percentage or nil,
-        cover_widget = buildScaledCoverWidget(cover_bb),
     }
+    persistLastReadSnapshot()
 end
 
 local function buildBackgroundCover(ui)
@@ -379,7 +422,9 @@ local function buildKoboStyleReceipt(ui, state)
     end
 end
 
-local function buildLastReadReceipt()
+local function buildLastReadReceipt(cover_widget)
+    hydrateLastReadSnapshot()
+
     if not last_read_snapshot.title or last_read_snapshot.title == "" then
         return nil
     end
@@ -456,10 +501,10 @@ local function buildLastReadReceipt()
         },
     }
 
-    if last_read_snapshot.cover_widget then
+    if cover_widget then
         return OverlapGroup:new{
             dimen = screen_size,
-            last_read_snapshot.cover_widget,
+            cover_widget,
             positioned_box,
         }
     end
@@ -503,9 +548,13 @@ Screensaver.show = function(self)
 
     local ui = self.ui or ReaderUI.instance
     local state = ui and ui.view and ui.view.state
+    local fallback_cover_widget = nil
 
     if hasActiveDocument(ui) then
         updateLastReadSnapshot(ui, state)
+    else
+        hydrateLastReadSnapshot()
+        fallback_cover_widget = ensureLastReadCoverWidget(ui)
     end
 
     if self.screensaver_widget then
@@ -523,7 +572,7 @@ Screensaver.show = function(self)
         Device.orig_rotation_mode = nil
     end
 
-    local receipt_widget = buildKoboStyleReceipt(ui, state) or buildLastReadReceipt()
+    local receipt_widget = buildKoboStyleReceipt(ui, state) or buildLastReadReceipt(fallback_cover_widget)
 
     if receipt_widget then
         local dark_mode = G_reader_settings:isTrue(KOBO_STYLE_DARK_MODE_SETTING)
