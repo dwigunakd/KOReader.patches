@@ -246,6 +246,21 @@ local function updateLastReadSnapshot(ui, state)
     persistLastReadSnapshot()
 end
 
+local function getLastReadSummary()
+    hydrateLastReadSnapshot()
+
+    if not last_read_snapshot.title or last_read_snapshot.title == "" then
+        return nil
+    end
+
+    local summary_text = last_read_snapshot.title
+    if last_read_snapshot.percentage then
+        summary_text = string.format("%s · %d%%", last_read_snapshot.title, last_read_snapshot.percentage)
+    end
+
+    return utf8Sub(summary_text, 110)
+end
+
 local function buildBackgroundCover(ui)
     local cover_bb = getActiveDocumentCover(ui)
     return buildScaledCoverWidget(cover_bb)
@@ -423,9 +438,8 @@ local function buildKoboStyleReceipt(ui, state)
 end
 
 local function buildLastReadReceipt(cover_widget)
-    hydrateLastReadSnapshot()
-
-    if not last_read_snapshot.title or last_read_snapshot.title == "" then
+    local summary_text = getLastReadSummary()
+    if not summary_text then
         return nil
     end
 
@@ -451,11 +465,6 @@ local function buildLastReadReceipt(cover_widget)
 
     local label_face = Font:getFace("NotoSerif-Regular.ttf", Screen:scaleBySize(10))
     local title_face = Font:getFace("NotoSerif-Regular.ttf", Screen:scaleBySize(9))
-
-    local summary_text = last_read_snapshot.title
-    if last_read_snapshot.percentage then
-        summary_text = string.format("%s · %d%%", last_read_snapshot.title, last_read_snapshot.percentage)
-    end
 
     local box_content = VerticalGroup:new{
         align = "left",
@@ -519,14 +528,6 @@ local function cacheLastReadFromUI(ui)
     if not ui then return end
     local state = ui.view and ui.view.state
     pcall(updateLastReadSnapshot, ui, state)
-end
-
-if type(ReaderUI.onCloseWidget) == "function" then
-    local orig_readerui_onclosewidget = ReaderUI.onCloseWidget
-    ReaderUI.onCloseWidget = function(self, ...)
-        cacheLastReadFromUI(self)
-        return orig_readerui_onclosewidget(self, ...)
-    end
 end
 
 if type(ReaderUI.onClose) == "function" then
