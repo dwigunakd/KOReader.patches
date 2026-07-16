@@ -5,11 +5,11 @@
     Changes from original:
     - Lazy-require all heavy modules (only loaded when screensaver actually shows)
     - Single dark-mode color table resolved once per show() call, not duplicated
-    - Cover blitbuffer freed after scaling to avoid double-memory hold
+    - Delegates cover loading, scaling, and screensaver lifecycle to KOReader
     - Database connection guaranteed closed via pcall + explicit close
     - screensaver_type forced to "kobo_style" on load so menu-injection race is irrelevant
     - ReaderUI hook uses safer event-style fallback if onClose is not yet a function
-    - Screensaver.show fully guarded: never falls back silently to orig with no log
+    - Native screensaver lifecycle retained; only the info overlay is patched
     - utf8Len removed (unused); utf8Sub inlined with one pass
     - No module-level ImageWidget/Font/etc allocations; all created inside show scope
     - HorizontalSpan with width=0 replaced with nothing (saves a widget table)
@@ -21,7 +21,6 @@ local ReaderUI   = require("apps/reader/readerui")
 local UIManager  = require("ui/uimanager")   -- needed at show() time, always present
 local util       = require("util")
 local _          = require("gettext")
-local bit        = require("bit")
 local lfs        = require("libs/libkoreader-lfs")
 
 local Screen = Device.screen
@@ -30,6 +29,8 @@ local Screen = Device.screen
 local SCREENSAVER_TYPE_KEY  = "screensaver_type"
 local SCREENSAVER_TYPE_VAL  = "kobo_style"
 local DARK_MODE_KEY         = "kobo_style_screensaver_dark_mode"
+local TRANSPARENT_CARD_KEY  = "kobo_style_screensaver_transparent_card"
+local SHOW_HIGHLIGHT_KEY    = "kobo_style_screensaver_show_highlight"
 local LAST_TITLE_KEY        = "kobo_style_last_read_title"
 local LAST_PCT_KEY          = "kobo_style_last_read_percentage"
 local LAST_FILE_KEY         = "lastfile"
@@ -40,6 +41,7 @@ local LAST_READ_LABEL       = _("Last Read")
 -- Persisted to G_reader_settings so it survives across sessions.
 local snapshot = {}   -- { title=string, percentage=number|nil }
 local snapshot_loaded = false
+local last_highlight_index
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -174,18 +176,19 @@ local function captureSnapshot(ui, state)
 end
 
 -- ── Color palette (resolved once per show call) ───────────────────────────────
-local function makeColors(dark)
+local function makeColors(dark, transparent)
     local BB = require("ffi/blitbuffer")
     if dark then
         return {
-            bg     = BB.COLOR_BLACK,
+            -- A nil background leaves the cover visible beneath the receipt.
+            bg     = transparent and nil or BB.COLOR_BLACK,
             fg     = BB.COLOR_WHITE,
             light  = BB.COLOR_GRAY_E,
             border = BB.COLOR_WHITE,
         }
     else
         return {
-            bg     = BB.COLOR_WHITE,
+            bg     = transparent and nil or BB.COLOR_WHITE,
             fg     = BB.COLOR_BLACK,
             light  = BB.COLOR_GRAY_3,
             border = BB.COLOR_BLACK,
@@ -193,42 +196,36 @@ local function makeColors(dark)
     end
 end
 
--- ── Cover widget (scales cover; does NOT free source — it belongs to the cache) ─
-local function makeCoverWidget(bb)
-    if not bb then return nil end
-    local RenderImage = require("ui/renderimage")
-    local ImageWidget = require("ui/widget/imagewidget")
-    local sw, sh = Screen:getWidth(), Screen:getHeight()
-    -- Pass false for free_bb: the blitbuffer is owned by KOReader's BookInfo
-    -- cache; freeing it here causes a segfault when the cache later tries to
-    -- paint or evict it.
-    local scaled = RenderImage:scaleBlitBuffer(bb, sw, sh, false)
-    if not scaled then return nil end
-    return ImageWidget:new{ image = scaled, width = sw, height = sh, alpha = true }
-end
+-- Read the last book's sidecar, as the reference banner patch does, so this
+-- works both with an open document and from the file manager.
+local function getRandomHighlight()
+    local last_file = G_reader_settings:readSetting(LAST_FILE_KEY)
+    if not last_file or last_file == "" then return nil end
 
-local function getActiveCover(ui)
-    if not hasDoc(ui) or not ui.bookinfo then return nil end
-    -- getCoverImage is an instance method: bookinfo:getCoverImage(document)
-    local ok, bb = pcall(ui.bookinfo.getCoverImage, ui.bookinfo, ui.document)
-    return (ok and bb) or nil
-end
+    local ok, BookList = pcall(require, "ui/widget/booklist")
+    if not ok or not BookList then return nil end
+    local ok_settings, sidecar = pcall(BookList.getDocSettings, last_file)
+    if not ok_settings or not sidecar then return nil end
 
-local function getLastFileCover(ui)
-    -- When no book is open, try to load the cover of the last-read file from disk.
-    -- getCoverImage(document, filepath) — pass nil doc, real filepath.
-    local f = G_reader_settings:readSetting(LAST_FILE_KEY)
-    if not f or f == "" then return nil end
-    -- BookInfo.getCoverImage can work without a live document when given a filepath.
-    -- We need any bookinfo instance; try from a live ui or fallback to a direct require.
-    local bookinfo = (ui and ui.bookinfo)
-    if not bookinfo then
-        local ok, bi = pcall(require, "ui/widget/bookinfomanager")
-        if ok and bi then bookinfo = bi end
+    local ok_annotations, annotations = pcall(sidecar.readSetting, sidecar, "annotations")
+    if not ok_annotations then return nil end
+
+    local usable = {}
+    for _, annotation in ipairs(annotations or {}) do
+        -- Match the styles enabled by default in the reference banner patch.
+        if annotation.text and (annotation.drawer == "lighten" or annotation.drawer == "underscore") then
+            local text = util.trim(annotation.text)
+            if text ~= "" then table.insert(usable, text) end
+        end
     end
-    if not bookinfo then return nil end
-    local ok, bb = pcall(bookinfo.getCoverImage, bookinfo, nil, f)
-    return (ok and bb) or nil
+    if #usable == 0 then return nil end
+
+    local index = math.random(#usable)
+    if #usable > 1 and index == last_highlight_index then
+        index = index % #usable + 1
+    end
+    last_highlight_index = index
+    return utf8Sub(usable[index], 280)
 end
 
 -- ── Info-box builder (shared by both active and last-read paths) ──────────────
@@ -237,7 +234,6 @@ end
     Returns a positioned OverlapGroup anchored bottom-left.
 --]]
 local function buildInfoBox(rows, colors, screen_size)
-    local Font           = require("ui/font")
     local FrameContainer = require("ui/widget/container/framecontainer")
     local HorizontalGroup = require("ui/widget/horizontalgroup")
     local OverlapGroup   = require("ui/widget/overlapgroup")
@@ -348,6 +344,12 @@ local function buildActiveReceipt(ui, state, colors, screen_size)
     if today_text then
         rows[#rows+1] = { text = today_text, face = f_sub, color = colors.light, bold = true }
     end
+    if G_reader_settings:isTrue(SHOW_HIGHLIGHT_KEY) then
+        local highlight = getRandomHighlight()
+        if highlight then
+            rows[#rows+1] = { text = "“" .. highlight .. "”", face = f_sub, color = colors.fg, multiline = true }
+        end
+    end
 
     return buildInfoBox(rows, colors, screen_size)
 end
@@ -372,21 +374,14 @@ local function buildLastReadReceipt(colors, screen_size)
         { text = LAST_READ_LABEL, face = f_label, color = colors.light, bold = true },
         { text = summary,         face = f_title, color = colors.fg,    bold = true, multiline = true },
     }
+    if G_reader_settings:isTrue(SHOW_HIGHLIGHT_KEY) then
+        local highlight = getRandomHighlight()
+        if highlight then
+            rows[#rows+1] = { text = "“" .. highlight .. "”", face = f_title, color = colors.fg, multiline = true }
+        end
+    end
 
     return buildInfoBox(rows, colors, screen_size)
-end
-
--- ── Composite: cover + info box ───────────────────────────────────────────────
-local function compose(cover_widget, info_widget, screen_size)
-    local OverlapGroup = require("ui/widget/overlapgroup")
-    if cover_widget and info_widget then
-        return OverlapGroup:new{ dimen = screen_size, cover_widget, info_widget }
-    elseif info_widget then
-        return OverlapGroup:new{ dimen = screen_size, info_widget }
-    elseif cover_widget then
-        return OverlapGroup:new{ dimen = screen_size, cover_widget }
-    end
-    return nil
 end
 
 -- ── ReaderUI close hook – capture snapshot before book unloads ────────────────
@@ -422,82 +417,73 @@ if not G_reader_settings:readSetting(SCREENSAVER_TYPE_KEY) then
     G_reader_settings:saveSetting(SCREENSAVER_TYPE_KEY, SCREENSAVER_TYPE_VAL)
 end
 
--- ── Screensaver.show patch ────────────────────────────────────────────────────
+-- ── Native screensaver adapter ───────────────────────────────────────────────
+-- Keep the custom choice in settings, but let KOReader's setup() build a normal
+-- cover screensaver. This retains its cover fallbacks, rotation, refresh, and
+-- lock handling instead of duplicating them in this patch.
 local Screensaver = require("ui/screensaver")
-local orig_show   = Screensaver.show
+local orig_setup = Screensaver.setup
 
-Screensaver.show = function(self)
-    -- Only handle our custom type; everything else is untouched
-    local stype = G_reader_settings:readSetting(SCREENSAVER_TYPE_KEY)
-    if stype ~= SCREENSAVER_TYPE_VAL then
-        return orig_show(self)
+Screensaver.setup = function(self, ...)
+    if G_reader_settings:readSetting(SCREENSAVER_TYPE_KEY) ~= SCREENSAVER_TYPE_VAL then
+        return orig_setup(self, ...)
     end
 
-    local ScreenSaverWidget = require("ui/widget/screensaverwidget")
-    local Blitbuffer        = require("ffi/blitbuffer")
-
-    local ui       = self.ui or ReaderUI.instance
-    local state    = ui and ui.view and ui.view.state
-    local dark     = G_reader_settings:isTrue(DARK_MODE_KEY)
-    local colors   = makeColors(dark)
-    local ss       = Screen:getSize()
-
-    -- Snapshot: capture if book open, otherwise load from disk
-    if hasDoc(ui) then
-        pcall(captureSnapshot, ui, state)
-    else
-        loadSnapshot()
+    -- setup() synchronously reads these two settings. Temporarily present a
+    -- native cover mode and suppress the normal message, without writing user
+    -- settings or changing the selected custom type.
+    local readSetting, isTrue = G_reader_settings.readSetting, G_reader_settings.isTrue
+    G_reader_settings.readSetting = function(settings, key, ...)
+        if key == SCREENSAVER_TYPE_KEY
+            or (type(key) == "string" and key:match("_screensaver_type$")) then
+            return "cover"
+        end
+        return readSetting(settings, key, ...)
+    end
+    G_reader_settings.isTrue = function(settings, key, ...)
+        if key == "screensaver_show_message" then return false end
+        return isTrue(settings, key, ...)
     end
 
-    -- Close any existing widget first
-    if self.screensaver_widget then
-        UIManager:close(self.screensaver_widget)
-        self.screensaver_widget = nil
+    local ok, result = pcall(orig_setup, self, ...)
+    G_reader_settings.readSetting, G_reader_settings.isTrue = readSetting, isTrue
+    if not ok then error(result, 0) end
+    return result
+end
+
+local function addInfoOverlay(widget)
+    local ui = ReaderUI.instance
+    if not ui then
+        local ok, FileManager = pcall(require, "apps/filemanager/filemanager")
+        ui = ok and FileManager and FileManager.instance or nil
     end
+    local state = ui and ui.view and ui.view.state
+    if hasDoc(ui) then pcall(captureSnapshot, ui, state) else loadSnapshot() end
 
-    Device.screen_saver_mode = true
-
-    -- Rotation correction
-    local rot = Screen:getRotationMode()
-    if bit.band(rot, 1) == 1 then
-        Device.orig_rotation_mode = rot
-        Screen:setRotationMode(Screen.DEVICE_ROTATED_UPRIGHT)
-    else
-        Device.orig_rotation_mode = nil
+    local colors = makeColors(
+        G_reader_settings:isTrue(DARK_MODE_KEY),
+        G_reader_settings:isTrue(TRANSPARENT_CARD_KEY)
+    )
+    local screen_size = Screen:getSize()
+    local info = hasDoc(ui) and buildActiveReceipt(ui, state, colors, screen_size)
+        or buildLastReadReceipt(colors, screen_size)
+    if info then
+        local OverlapGroup = require("ui/widget/overlapgroup")
+        widget.widget = OverlapGroup:new{ dimen = screen_size, widget.widget, info }
+        widget._kobo_style_overlay = true
     end
+end
 
-    -- Build cover widget (active book first, then last-file fallback)
-    local cover_widget
-    if hasDoc(ui) then
-        cover_widget = makeCoverWidget(getActiveCover(ui))
-    else
-        cover_widget = makeCoverWidget(getLastFileCover(ui))
+local orig_uimanager_show = UIManager.show
+UIManager.show = function(self, widget, ...)
+    if G_reader_settings:readSetting(SCREENSAVER_TYPE_KEY) == SCREENSAVER_TYPE_VAL
+        and widget and widget.name == "ScreenSaver" and widget.widget
+        and not widget._kobo_style_overlay then
+        -- The native lockscreen must remain usable even if a custom receipt
+        -- (for example, a malformed highlight sidecar) cannot be built.
+        pcall(addInfoOverlay, widget)
     end
-
-    -- Build info overlay
-    local info_widget
-    if hasDoc(ui) then
-        info_widget = buildActiveReceipt(ui, state, colors, ss)
-    else
-        info_widget = buildLastReadReceipt(colors, ss)
-    end
-
-    local final = compose(cover_widget, info_widget, ss)
-
-    if final then
-        local bg = dark and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
-        self.screensaver_widget = ScreenSaverWidget:new{
-            widget          = final,
-            background      = bg,
-            covers_fullscreen = true,
-        }
-        self.screensaver_widget.modal    = true
-        self.screensaver_widget.dithered = true
-        UIManager:show(self.screensaver_widget, "full")
-    else
-        -- Absolute last resort: no cover, no snapshot → standard screensaver
-        return orig_show(self)
-    end
+    return orig_uimanager_show(self, widget, ...)
 end
 
 -- ── Menu injection (best-effort; not critical due to forced setting above) ────
@@ -540,6 +526,24 @@ _G.dofile = function(filepath, ...)
                         end,
                         callback     = function()
                             G_reader_settings:flipNilOrFalse(DARK_MODE_KEY)
+                        end,
+                    },
+                    {
+                        text         = _("Transparent info card"),
+                        checked_func = function()
+                            return G_reader_settings:isTrue(TRANSPARENT_CARD_KEY)
+                        end,
+                        callback     = function()
+                            G_reader_settings:flipNilOrFalse(TRANSPARENT_CARD_KEY)
+                        end,
+                    },
+                    {
+                        text         = _("Show a saved highlight"),
+                        checked_func = function()
+                            return G_reader_settings:isTrue(SHOW_HIGHLIGHT_KEY)
+                        end,
+                        callback     = function()
+                            G_reader_settings:flipNilOrFalse(SHOW_HIGHLIGHT_KEY)
                         end,
                     },
                 },
